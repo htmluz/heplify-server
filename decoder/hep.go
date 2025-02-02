@@ -74,6 +74,8 @@ func (h *HEP) parseHEP(packet []byte) error {
 				h.ProtoString = "sip"
 			case 5:
 				h.ProtoString = "rtcp"
+			case 7:
+				h.ProtoString = "rtp"
 			case 34:
 				h.ProtoString = "rtpagent"
 			case 35:
@@ -92,6 +94,9 @@ func (h *HEP) parseHEP(packet []byte) error {
 		case NodePW:
 			h.NodePW = string(chunkBody)
 		case Payload:
+			if h.ProtoType == 7 {
+				h.RTPPayload = chunkBody
+			}
 			h.Payload = string(chunkBody)
 		case CID:
 			h.CID = string(chunkBody)

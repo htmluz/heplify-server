@@ -1,0 +1,116 @@
+version: '3.1'
+
+networks:
+  monitor-net:
+    driver: bridge
+
+volumes:
+    prometheus_data: {}
+
+services:
+  postgres:
+    image: postgres:10-alpine
+    environment:
+      POSTGRES_USER: homer
+      POSTGRES_PASSWORD: homer
+    networks:
+      - monitor-net
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U homer -d homer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    networks:
+      - monitor-net
+    labels:
+      org.label-schema.group: "monitoring"
+
+  #hepgen:
+    #  image: qxip/docker-hepgen
+    #container_name: hepgen
+    #environment:
+#  - "HEP_SERVER=heplify-server"
+#      - "HEP_PORT=9060"
+#      - "HEP_PROTO=udp4"
+#      - "LOOP=10"
+    #    restart: unless-stopped
+    #networks:
+      ##  - monitor-net
+    #depends_on:
+#  - postgres
+
+  #  hepgen-bad:
+    #  image: qxip/docker-hepgen
+    #container_name: hepgen-bad
+    #environment:
+#  - "HEP_SERVER=heplify-server"
+#      - "HEP_PORT=9060"
+#      - "HEP_PROTO=udp4"
+#      - "LOOP=1"
+#      - "SLEEP=60"
+#      - "HEP_CONFIG=b2bcall_rtcp_bad.js"
+    #    restart: unless-stopped
+    #networks:
+#  - monitor-net
+    #    depends_on:
+#  - postgres
+
+  heplify-server:
+    image: heplify-serverl:rtp2
+    container_name: heplify-server
+    ports:
+      - "9060:9060"
+      - "9096:9096"
+      - "9060:9060/udp"
+      - "9061:9061/tcp"
+      - "3000:3000"
+    command:
+      - './heplify-server'
+    environment:
+      - "HEPLIFYSERVER_CONFIGHTTPADDR=0.0.0.0:3000"
+      - "HEPLIFYSERVER_HEPADDR=0.0.0.0:9060"
+      - "HEPLIFYSERVER_HEPTCPADDR=0.0.0.0:9061"
+      - "HEPLIFYSERVER_DBSHEMA=homer7"
+      - "HEPLIFYSERVER_DBDRIVER=postgres"
+      - "HEPLIFYSERVER_DBUSER=homer"
+      - "HEPLIFYSERVER_DBPASS=homer"
+      - "HEPLIFYSERVER_DBADDR=postgres:5432"
+      - "HEPLIFYSERVER_DBDATATABLE=homer"
+      - "HEPLIFYSERVER_LOGLVL=debug"
+      - "HEPLIFYSERVER_LOGSTD=true"
+      - "HEPLIFYSERVER_PROMADDR=0.0.0.0:9096"
+      - "HEPLIFYSERVER_DEDUP=false"
+    restart: unless-stopped
+    networks:
+      - monitor-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - 9060
+      - 9061
+      - 9090
+      - 9096
+    logging:
+      options:
+        max-size: "50m"

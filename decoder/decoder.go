@@ -77,6 +77,7 @@ type HEP struct {
 	NodeID      uint32 `protobuf:"varint,10,req,name=NodeID" json:"NodeID"`
 	NodePW      string `protobuf:"bytes,11,req,name=NodePW" json:"NodePW"`
 	Payload     string `protobuf:"bytes,12,req,name=Payload" json:"Payload"`
+	RTPPayload  []byte `json:"RTPPayload,omitempty"`
 	CID         string `protobuf:"bytes,13,req,name=CID" json:"CID"`
 	Vlan        uint32 `protobuf:"varint,14,req,name=Vlan" json:"Vlan"`
 	ProtoString string
@@ -154,6 +155,8 @@ func (h *HEP) parse(packet []byte) error {
 				}
 			}
 		}
+	}
+	if h.ProtoType == 7 && len(h.Payload) > 6 {
 	}
 
 	if h.NodeName == "" {

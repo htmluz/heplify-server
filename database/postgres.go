@@ -23,6 +23,7 @@ const (
 	registerCopy = "COPY hep_proto_1_registration(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
 	defaultCopy  = "COPY hep_proto_1_default(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
 	rtcpCopy     = "COPY hep_proto_5_default(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
+	rtpCopy      = "COPY hep_proto_7_default(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
 	reportCopy   = "COPY hep_proto_35_default(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
 	dnsCopy      = "COPY hep_proto_53_default(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
 	isupCopy     = "COPY hep_proto_54_default(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
@@ -64,7 +65,7 @@ func (p *Postgres) setup() error {
 
 func (p *Postgres) insert(hCh chan *decoder.HEP) {
 	var (
-		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, isupCnt, reportCnt int
+		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, rtpCnt, isupCnt, reportCnt int
 
 		callRows   = make([]string, 0, p.bulkCnt)
 		regRows    = make([]string, 0, p.bulkCnt)
@@ -73,6 +74,7 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 		logRows    = make([]string, 0, p.bulkCnt)
 		isupRows   = make([]string, 0, p.bulkCnt)
 		rtcpRows   = make([]string, 0, p.bulkCnt)
+		rtpRows    = make([]interface{}, 0, p.bulkCnt)
 		reportRows = make([]string, 0, p.bulkCnt)
 		maxWait    = p.dbTimer
 	)
@@ -156,6 +158,14 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 						p.bulkInsert(rtcpCopy, rtcpRows)
 						rtcpRows = []string{}
 						rtcpCnt = 0
+					}
+				case 7:
+					rtpRows = append(rtpRows, pkt.CID, date, pHeader, dHeader, pkt.RTPPayload)
+					rtpCnt++
+					if rtpCnt == p.bulkCnt {
+						p.bulkInsertRTP(rtpCopy, rtpRows)
+						rtpRows = []interface{}{}
+						rtpCnt = 0
 					}
 				case 53:
 					dnsRows = append(dnsRows, pkt.CID, date, pHeader, dHeader, pkt.Payload)
@@ -286,6 +296,54 @@ func (p *Postgres) bulkInsert(query string, rows []string) {
 	if err != nil {
 		logp.Err("%v", err)
 	}
+	err = tx.Commit()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+
+	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)
+}
+
+func (p *Postgres) bulkInsertRTP(query string, rows []interface{}) {
+	tx, err := p.db.Begin()
+	logp.Info("insertrtp")
+
+	if err != nil || tx == nil {
+		logp.Err("%v", err)
+		return
+	}
+	logp.Info("insertrtp2")
+
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		logp.Err("%v", err)
+		err := tx.Rollback()
+		if err != nil {
+			logp.Err("%v", err)
+		}
+		return
+	}
+	logp.Info("insertrtp3")
+
+	for i := 0; i < len(rows); i = i + 5 {
+		_, err = stmt.Exec(rows[i].(string), rows[i+1].(string), rows[i+2].(string), rows[i+3].(string), rows[i+4].([]byte))
+		if err != nil {
+			logp.Err("%v", err)
+			logp.Info("erro exec query %v", err)
+			continue
+		}
+	}
+
+	logp.Info("insertrtp4")
+	_, err = stmt.Exec()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+	err = stmt.Close()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+	logp.Info("insertrtp5")
 	err = tx.Commit()
 	if err != nil {
 		logp.Err("%v", err)

@@ -5,6 +5,7 @@ var (
 	selectreportpg   = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_35_default_%' and tablename < 'hep_proto_35_default_{{date}}_{{time}}';"
 	selectisuppg     = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_54_default_%' and tablename < 'hep_proto_54_default_{{date}}_{{time}}';"
 	selectrtcppg     = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_5_default_%' and tablename < 'hep_proto_5_default_{{date}}_{{time}}';"
+	selectrtppg      = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_7_default_%' and tablename < 'hep_proto_7_default_{{date}}_{{time}}';"
 	selectcallpg     = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_1_call_%' and tablename < 'hep_proto_1_call_{{date}}_{{time}}';"
 	selectregisterpg = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_1_registration_%' and tablename < 'hep_proto_1_registration_{{date}}_{{time}}';"
 	selectdefaultpg  = "SELECT tablename FROM pg_tables WHERE tablename LIKE 'hep_proto_1_default_%' and tablename < 'hep_proto_1_default_{{date}}_{{time}}';"
@@ -56,6 +57,12 @@ var idxqospg = []string{
 	"CREATE INDEX IF NOT EXISTS hep_proto_5_default_{{date}}_{{time}}_srcIp ON hep_proto_5_default_{{date}}_{{time}} ((protocol_header->>'srcIp'));",
 	"CREATE INDEX IF NOT EXISTS hep_proto_5_default_{{date}}_{{time}}_dstIp ON hep_proto_5_default_{{date}}_{{time}} ((protocol_header->>'dstIp'));",
 	"CREATE INDEX IF NOT EXISTS hep_proto_5_default_{{date}}_{{time}}_correlation_id ON hep_proto_5_default_{{date}}_{{time}} ((protocol_header->>'correlation_id'));",
+
+	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_create_date ON hep_proto_7_default_{{date}}_{{time}} (create_date);",
+	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_sid ON hep_proto_7_default_{{date}}_{{time}} (sid);",
+	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_srcIp ON hep_proto_7_default_{{date}}_{{time}} ((protocol_header->>'srcIp'));",
+	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_dstIp ON hep_proto_7_default_{{date}}_{{time}} ((protocol_header->>'dstIp'));",
+	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_correlation_id ON hep_proto_7_default_{{date}}_{{time}} ((protocol_header->>'correlation_id'));",
 }
 
 var idxsippg = []string{
@@ -116,6 +123,7 @@ var parisuppg = []string{
 var parqospg = []string{
 	"CREATE TABLE IF NOT EXISTS hep_proto_35_default_{{date}}_{{time}} PARTITION OF hep_proto_35_default FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
 	"CREATE TABLE IF NOT EXISTS hep_proto_5_default_{{date}}_{{time}} PARTITION OF hep_proto_5_default FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
+	"CREATE TABLE IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}} PARTITION OF hep_proto_7_default FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
 }
 
 var parsippg = []string{
@@ -150,6 +158,15 @@ var tbldatapg = []string{
 		protocol_header jsonb NOT NULL,
 		data_header jsonb NOT NULL,
 		raw varchar NOT NULL
+	) PARTITION BY RANGE (create_date);`,
+
+	`CREATE TABLE IF NOT EXISTS hep_proto_7_default (
+		id BIGSERIAL NOT NULL,
+		sid varchar NOT NULL,
+		create_date timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+		protocol_header jsonb NOT NULL,
+		data_header jsonb NOT NULL,
+		raw bytea NOT NULL
 	) PARTITION BY RANGE (create_date);`,
 
 	`CREATE TABLE IF NOT EXISTS hep_proto_1_call (
