@@ -71,6 +71,33 @@ func makeRTCDataHeader(h *decoder.HEP, bb *bytebufferpool.ByteBuffer) string {
 	return bb.String()
 }
 
+func makeRTPDataHeader(h *decoder.HEP, bb *bytebufferpool.ByteBuffer) string {
+	bb.Reset()
+	bb.WriteString(`{`)
+	bb.WriteString(`"node":"`)
+	bb.WriteString(h.NodeName)
+	bb.WriteString(`", "Version":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.Version), 10))
+	bb.WriteString(`", "Padding":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.Padding), 10))
+	bb.WriteString(`", "Extension":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.Extension), 10))
+	bb.WriteString(`", "CC":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.CC), 10))
+	bb.WriteString(`", "Marker":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.Marker), 10))
+	bb.WriteString(`", "PayloadType":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.PayloadType), 10))
+	bb.WriteString(`", "SequenceNumber":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.SequenceNumber), 10))
+	bb.WriteString(`", "Timestamp":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.Timestamp), 10))
+	bb.WriteString(`", "Ssrc":"`)
+	bb.WriteString(strconv.FormatUint(uint64(h.RTPHeaders.Ssrc), 10))
+	bb.WriteString(`"}`)
+	return bb.String()
+}
+
 var IsupPaths = [][]string{
 	[]string{"cic"},
 	[]string{"dpc"},

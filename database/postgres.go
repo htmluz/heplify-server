@@ -18,6 +18,14 @@ type Postgres struct {
 	forceHEPPayload []int
 }
 
+type RTPRow struct {
+	SID            string
+	CreateDate     string
+	ProtocolHeader string
+	DataHeader     string
+	RTPPayload     []byte
+}
+
 const (
 	callCopy     = "COPY hep_proto_1_call(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
 	registerCopy = "COPY hep_proto_1_registration(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
@@ -74,7 +82,7 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 		logRows    = make([]string, 0, p.bulkCnt)
 		isupRows   = make([]string, 0, p.bulkCnt)
 		rtcpRows   = make([]string, 0, p.bulkCnt)
-		rtpRows    = make([]interface{}, 0, p.bulkCnt)
+		rtpRows    = make([]RTPRow, 0, p.bulkCnt)
 		reportRows = make([]string, 0, p.bulkCnt)
 		maxWait    = p.dbTimer
 	)
@@ -146,7 +154,23 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 					isupRows = []string{}
 					isupCnt = 0
 				}
+			} else if pkt.ProtoType == 7 && pkt.RTPPayload != nil && pkt.CID != "" {
+				pHeader := makeProtoHeader(pkt, bb)
+				dHeader := makeRTPDataHeader(pkt, bb)
 
+				rtpRows = append(rtpRows, RTPRow{
+					SID:            pkt.CID,
+					CreateDate:     date,
+					ProtocolHeader: pHeader,
+					DataHeader:     dHeader,
+					RTPPayload:     pkt.RTPPayload,
+				})
+				rtpCnt++
+				if rtpCnt == 10 {
+					p.bulkInsertRTP(rtpCopy, rtpRows)
+					rtpRows = make([]RTPRow, 0, p.bulkCnt)
+					rtpCnt = 0
+				}
 			} else if pkt.ProtoType >= 2 && pkt.Payload != "" && pkt.CID != "" {
 				pHeader := makeProtoHeader(pkt, bb)
 				dHeader := makeRTCDataHeader(pkt, bb)
@@ -159,14 +183,16 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 						rtcpRows = []string{}
 						rtcpCnt = 0
 					}
-				case 7:
-					rtpRows = append(rtpRows, pkt.CID, date, pHeader, dHeader, pkt.RTPPayload)
-					rtpCnt++
-					if rtpCnt == p.bulkCnt {
-						p.bulkInsertRTP(rtpCopy, rtpRows)
-						rtpRows = []interface{}{}
-						rtpCnt = 0
-					}
+				/*
+					case 7:
+						rtpRows = append(rtpRows, pkt.CID, date, pHeader, dHeader, pkt.RTPPayload)
+						rtpCnt++
+						if rtpCnt == p.bulkCnt {
+							p.bulkInsertRTP(rtpCopy, rtpRows)
+							rtpRows = []interface{}{}
+							rtpCnt = 0
+						}
+				*/
 				case 53:
 					dnsRows = append(dnsRows, pkt.CID, date, pHeader, dHeader, pkt.Payload)
 					dnsCnt++
@@ -304,49 +330,49 @@ func (p *Postgres) bulkInsert(query string, rows []string) {
 	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)
 }
 
-func (p *Postgres) bulkInsertRTP(query string, rows []interface{}) {
+func (p *Postgres) bulkInsertRTP(query string, rows []RTPRow) {
+	//need to fix this bulkInsert, had some problems with copy
+	logp.Info("bulkinsert rtp")
 	tx, err := p.db.Begin()
-	logp.Info("insertrtp")
-
 	if err != nil || tx == nil {
 		logp.Err("%v", err)
 		return
 	}
-	logp.Info("insertrtp2")
-
-	stmt, err := tx.Prepare(query)
-	if err != nil {
-		logp.Err("%v", err)
-		err := tx.Rollback()
+	defer func() {
 		if err != nil {
-			logp.Err("%v", err)
+			tx.Rollback()
 		}
-		return
-	}
-	logp.Info("insertrtp3")
+	}()
 
-	for i := 0; i < len(rows); i = i + 5 {
-		_, err = stmt.Exec(rows[i].(string), rows[i+1].(string), rows[i+2].(string), rows[i+3].(string), rows[i+4].([]byte))
+	insertQuery := `
+		insert into hep_proto_7_default (sid, create_date, protocol_header, data_header, raw)
+		values ($1, $2, $3, $4, $5)
+	`
+
+	for _, row := range rows {
+		payloadCopy := make([]byte, len(row.RTPPayload))
+		copy(payloadCopy, row.RTPPayload)
+		logp.Info("Antes do exec orignal %x", row.RTPPayload)
+		logp.Info("Antes do exec copy %x", payloadCopy)
+
+		_, err := tx.Exec(insertQuery,
+			row.SID,
+			row.CreateDate,
+			row.ProtocolHeader,
+			row.DataHeader,
+			payloadCopy,
+		)
 		if err != nil {
-			logp.Err("%v", err)
-			logp.Info("erro exec query %v", err)
-			continue
+			logp.Err("insert error %v", err)
 		}
+
 	}
 
-	logp.Info("insertrtp4")
-	_, err = stmt.Exec()
-	if err != nil {
-		logp.Err("%v", err)
-	}
-	err = stmt.Close()
-	if err != nil {
-		logp.Err("%v", err)
-	}
-	logp.Info("insertrtp5")
 	err = tx.Commit()
 	if err != nil {
-		logp.Err("%v", err)
+		logp.Err("erro no commit: %v", err)
+		tx.Rollback()
+		return
 	}
 
 	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)

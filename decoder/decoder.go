@@ -63,6 +63,18 @@ const (
 	NodeName  = 19 // Chunk 0x0013 NodeName
 )
 
+type RTPHeaders struct {
+	Version        uint8
+	Padding        uint8
+	Extension      uint8
+	CC             uint8
+	Marker         uint8
+	PayloadType    uint8
+	SequenceNumber uint16
+	Timestamp      uint32
+	Ssrc           uint32
+}
+
 // HEP represents HEP packet
 type HEP struct {
 	Version     uint32 `protobuf:"varint,1,req,name=Version" json:"Version"`
@@ -77,6 +89,7 @@ type HEP struct {
 	NodeID      uint32 `protobuf:"varint,10,req,name=NodeID" json:"NodeID"`
 	NodePW      string `protobuf:"bytes,11,req,name=NodePW" json:"NodePW"`
 	Payload     string `protobuf:"bytes,12,req,name=Payload" json:"Payload"`
+	RTPHeaders  *RTPHeaders
 	RTPPayload  []byte `json:"RTPPayload,omitempty"`
 	CID         string `protobuf:"bytes,13,req,name=CID" json:"CID"`
 	Vlan        uint32 `protobuf:"varint,14,req,name=Vlan" json:"Vlan"`
@@ -156,7 +169,15 @@ func (h *HEP) parse(packet []byte) error {
 			}
 		}
 	}
-	if h.ProtoType == 7 && len(h.Payload) > 6 {
+	if h.ProtoType == 7 && len(h.RTPPayload) > 6 {
+		err = h.parseRTP()
+		if err != nil {
+			logp.Warn("%v\n%q\nnodeID: %d, protoType: %d, version: %d, protocol: %d, flow: %s:%d->%s:%d\n\n",
+				err, h.Payload, h.NodeID, h.ProtoType, h.Version, h.Protocol, h.SrcIP, h.SrcPort, h.DstIP, h.DstPort)
+			return err
+		}
+
+		//validar aqui se vai ser salvo baseado nas regras
 	}
 
 	if h.NodeName == "" {
