@@ -94,10 +94,12 @@ func (h *HEP) parseHEP(packet []byte) error {
 		case NodePW:
 			h.NodePW = string(chunkBody)
 		case Payload:
-			if h.ProtoType == 7 {
+			switch h.ProtoType {
+			case 7:
 				h.RTPPayload = chunkBody
+			default:
+				h.Payload = string(chunkBody)
 			}
-			h.Payload = string(chunkBody)
 		case CID:
 			h.CID = string(chunkBody)
 		case Vlan:

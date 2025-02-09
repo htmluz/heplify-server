@@ -3,6 +3,7 @@ package decoder
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	reflect "reflect"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/VictoriaMetrics/fastcache"
 	xxhash "github.com/cespare/xxhash/v2"
+	"github.com/coocood/freecache"
 	"github.com/negbie/logp"
 	"github.com/sipcapture/heplify-server/config"
 	"github.com/sipcapture/heplify-server/sipparser"
@@ -30,6 +32,7 @@ import (
 var (
 	dedupCache            = fastcache.New(32 * 1024 * 1024)
 	scriptCache           = fastcache.New(32 * 1024 * 1024)
+	rtpCache              = freecache.NewCache(64 * 1024 * 1024)
 	strBackslashQuote     = []byte(`\"`)
 	strBackslashBackslash = []byte(`\\`)
 	strBackslashN         = []byte(`\n`)
@@ -40,6 +43,20 @@ var (
 	strBackslashLT        = []byte(`\u003c`)
 	strBackslashQ         = []byte(`\u0027`)
 	strEmpty              = []byte(``)
+
+	// TODO: Move it to utils
+	contentTypeHeaderNames = [][]byte{
+		[]byte("Content-Type"),
+		[]byte("Content-type"),
+		[]byte("content-type"),
+		[]byte("CONTENT-TYPE"),
+		[]byte("c"),
+	}
+
+	sdpMethods = map[string]bool{
+		"UPDATE": true,
+		"INVITE": true,
+	}
 )
 
 // HEP chunks
@@ -62,6 +79,12 @@ const (
 	Vlan      = 18 // Chunk 0x0012 VLAN
 	NodeName  = 19 // Chunk 0x0013 NodeName
 )
+
+type DBValidator interface {
+	ValidateFilterRules(fromUser, toUser string) bool
+}
+
+var defaultValidator DBValidator
 
 type RTPHeaders struct {
 	Version        uint8
@@ -101,6 +124,10 @@ type HEP struct {
 	SID         string
 }
 
+func SetDbValidator(v DBValidator) {
+	defaultValidator = v
+}
+
 // DecodeHEP returns a parsed HEP message
 func DecodeHEP(packet []byte) (*HEP, error) {
 	hep := &HEP{}
@@ -110,6 +137,185 @@ func DecodeHEP(packet []byte) (*HEP, error) {
 	}
 	return hep, nil
 }
+
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Will add a srcIp+srcPort key and CID Value to the cache w 10 min expire time
+// .Set from freecache is an upsert method, good cuz of reinvites or something like dat i guess
+// not pretty sure just validate it later when its running
+func cacheCall(srcIp []byte, srcPort []byte, callId []byte) {
+	var buffer [60]byte
+	key := append(append(append(buffer[:0], srcIp...), ' '), srcPort...)
+
+	if err := rtpCache.Set(key, callId, 600); err != nil {
+		logp.Err("Error inserting callId onto cache %v", err)
+	}
+}
+
+func isCallCached(srcIp []byte, srcPort []byte) (bool, []byte) {
+	var buffer [60]byte
+	key := append(append(append(buffer[:0], srcIp...), ' '), srcPort...)
+
+	callId, err := rtpCache.Get(key)
+	if err != nil {
+		return false, nil
+	}
+	return true, callId
+}
+
+func validateSDP(payload string, callId string) {
+	bytePayload := []byte(payload)
+	byteCallId := []byte(callId)
+
+	// Do we have a header separator?
+	posHeaderEnd := bytes.Index(bytePayload, []byte("\r\n\r\n"))
+	if posHeaderEnd < 0 {
+		return
+	}
+	headers := bytePayload[:posHeaderEnd+4] // keep separator
+	content := bytePayload[posHeaderEnd+4:] // strip separator
+
+	// Do we have SDP content?
+	contentType, err := getHeaderValue(contentTypeHeaderNames, headers)
+	if err != nil {
+		// Content-Type only exists if there is content, no need for logging.
+		return
+	}
+
+	if !bytes.HasPrefix(contentType, []byte("application/sdp")) {
+		return
+	}
+
+	var (
+		posLine    = 0    // start of line.
+		posLineEnd = 0    // end of line, position of \n or end of content.
+		session    = true // in session or multimedia?
+		sessionIP  []byte // IP found in session connection.
+		rtpIP      []byte // IP for RTP.
+		rtpPort    []byte // port for RTP.
+	)
+
+sdpLoop:
+	for posLine = 0; posLine < len(content); posLine = posLineEnd + 1 {
+		// Find \n at end of line.
+		posLineEnd = posLine + bytes.Index(content[posLine:], []byte("\n"))
+		if posLineEnd < posLine {
+			posLineEnd = len(content)
+		}
+		// Get line without line separator, remove \r.
+		line := content[posLine:posLineEnd]
+		if bytes.HasSuffix(line, []byte("\r")) {
+			line = line[:len(line)-1]
+		}
+
+		// Skip lines that do not look like SDP.
+		if len(line) < 2 || line[1] != '=' {
+			// Multipart content contains non SDP lines, do not clutter the log.
+			logp.Debug("sdp", "Fishy sdp line %q. callID=%q", line, byteCallId)
+			continue sdpLoop
+		}
+
+		// Process SDP line.
+		switch line[0] {
+		case 'c':
+			// Connection line should contain at least
+			// "c=IN IP4 1.1.1.1" or "c=IN IP6 1111::".
+			if !bytes.HasPrefix(line, []byte("c=IN IP")) || len(line) < 16 {
+				logp.Debug("sdp", "Fishy c= line %q. callID=%q", line, byteCallId)
+				continue sdpLoop
+			}
+			// Extract IP.
+			ip := line[9:]
+			// Check for and strip ttl/count separated by slash.
+			sep := bytes.Index(ip, []byte("/"))
+			if sep > 0 {
+				ip = ip[:sep]
+			}
+			// Use as session or RTCP IP.
+			if session {
+				sessionIP = ip
+			} else {
+				rtpIP = ip
+			}
+		case 'm':
+			// Begin new media.
+			// No longer session.
+			session = false
+			// Add keys for previous media.
+			if len(rtpIP) > 0 && len(rtpPort) > 0 {
+				cacheCall(rtpIP, rtpPort, byteCallId)
+			}
+			// Reset RTP data for this media.
+			rtpIP = sessionIP
+			rtpPort = nil
+			// We are only interested in audio.
+			if !bytes.HasPrefix(line, []byte("m=audio ")) {
+				continue sdpLoop
+			}
+			// Find separator after RTP port number.
+			sep := bytes.Index(line[8:], []byte(" "))
+			if sep < 4 { // Port should be above 1000
+				logp.Debug("sdp", "Fishy m=audio line %q. callID=%q", line, byteCallId)
+				continue sdpLoop
+			}
+			// Extract RTP port.
+			rtpPort = line[8 : 8+sep]
+		default:
+			// ignore other SDP lines.
+		}
+	}
+	if len(rtpIP) > 0 && len(rtpPort) > 0 {
+		cacheCall(rtpIP, rtpPort, byteCallId)
+	}
+}
+
+func validateUserInDB(fromUser string, toUser string) bool {
+	if defaultValidator == nil {
+		return false
+	}
+	return defaultValidator.ValidateFilterRules(fromUser, toUser)
+}
+
+// Stolen from heplify
+// TODO: move to utils
+func getHeaderValue(headerNames [][]byte, data []byte) ([]byte, error) {
+	var startPos int = -1
+	var headerName []byte
+	var buffer [60]byte // use large enough buffer for header name and separators on stack for fast append
+	var search []byte
+	for hederNameIdx := range headerNames {
+		headerName = headerNames[hederNameIdx]
+		// Check if first header.
+		if bytes.HasPrefix(data, headerName) {
+			if len(data) > len(headerName) && data[len(headerName)] == ':' {
+				startPos = 0
+				break
+			}
+		}
+		// Check if other header.
+		search = append(append(append(buffer[:0], '\r', '\n'), headerName...), ':')
+		startPos = bytes.Index(data, search)
+		if startPos >= 0 {
+			// Skip new line
+			startPos += 2
+			break
+		}
+	}
+	if startPos < 0 {
+		return nil, errors.New("no such header")
+	}
+	endPos := bytes.Index(data[startPos:], []byte("\r\n"))
+	if endPos < 0 {
+		return nil, errors.New("no such header")
+	}
+	return bytes.TrimSpace(data[startPos+len(headerName)+1 : startPos+endPos]), nil
+}
+
+// This block up here can be thrown into a correlator.go lately
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
 
 func (h *HEP) parse(packet []byte) error {
 	var err error
@@ -152,6 +358,14 @@ func (h *HEP) parse(packet []byte) error {
 			return err
 		}
 
+		//Is a possible SDP method? if it is go through extracting the media endpoint
+		//UPDATE and INVITE
+		if sdpMethods[h.SIP.CseqMethod] {
+			if validateUserInDB(h.SIP.FromUser, h.SIP.ToUser) {
+				validateSDP(h.Payload, h.SIP.CallID)
+			}
+		}
+
 		for _, m := range config.Setting.CensorMethod {
 			if m == h.SIP.CseqMethod {
 				lb := len(h.SIP.Body)
@@ -170,14 +384,24 @@ func (h *HEP) parse(packet []byte) error {
 		}
 	}
 	if h.ProtoType == 7 && len(h.RTPPayload) > 6 {
-		err = h.parseRTP()
-		if err != nil {
-			logp.Warn("%v\n%q\nnodeID: %d, protoType: %d, version: %d, protocol: %d, flow: %s:%d->%s:%d\n\n",
-				err, h.Payload, h.NodeID, h.ProtoType, h.Version, h.Protocol, h.SrcIP, h.SrcPort, h.DstIP, h.DstPort)
-			return err
-		}
+		byteSrcIp := []byte(h.SrcIP)
+		strSrcPort := strconv.Itoa(int(h.SrcPort))
+		byteSrcPort := []byte(strSrcPort)
 
-		//validar aqui se vai ser salvo baseado nas regras
+		isCached, CID := isCallCached(byteSrcIp, byteSrcPort)
+		if isCached {
+			h.CID = string(CID)
+			err = h.parseRTP()
+			if err != nil {
+				logp.Warn("%v\n%q\nnodeID: %d, protoType: %d, version: %d, protocol: %d, flow: %s:%d->%s:%d\n\n",
+					err, h.Payload, h.NodeID, h.ProtoType, h.Version, h.Protocol, h.SrcIP, h.SrcPort, h.DstIP, h.DstPort)
+				return err
+			}
+		} else {
+			//if not cached wont store the RTP packet
+			h.ProtoType = 0
+			return nil
+		}
 	}
 
 	if h.NodeName == "" {

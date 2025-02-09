@@ -1,28 +1,13 @@
 package decoder
 
-import (
-	"github.com/negbie/logp"
-)
-
 func (h *HEP) parseRTP() error {
 	h.RTPPayload, h.RTPHeaders = parsePayload(h.RTPPayload)
-
-	logp.Info("Version %d", h.RTPHeaders.Version)
-	logp.Info("Padding %d", h.RTPHeaders.Padding)
-	logp.Info("Extension %d", h.RTPHeaders.Extension)
-	logp.Info("CC %d", h.RTPHeaders.CC)
-	logp.Info("Marker %d", h.RTPHeaders.Marker)
-	logp.Info("PayloadType %d", h.RTPHeaders.PayloadType)
-	logp.Info("SeqNumber %d", h.RTPHeaders.SequenceNumber)
-	logp.Info("Timestamp %d", h.RTPHeaders.Timestamp)
-	logp.Info("SSRC %d", h.RTPHeaders.Ssrc)
-	logp.Info("\n%x", h.RTPPayload)
 	return nil
 }
 
 func parsePayload(RTPPayload []byte) ([]byte, *RTPHeaders) {
 	//RTP header size(12 bytes)
-	if len(RTPPayload) < 12 {
+	if len(RTPPayload) < 12 || RTPPayload[0] != 0x80 {
 		return nil, nil
 	}
 

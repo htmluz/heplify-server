@@ -204,4 +204,11 @@ var tbldatapg = []string{
 		data_header jsonb NOT NULL,
 		raw varchar NOT NULL
 	) PARTITION BY RANGE (create_date);`,
+
+	`CREATE TABLE IF NOT EXISTS filter_rules (
+		id SERIAL PRIMARY KEY,
+		to_user varchar,
+		from_user varchar,
+		due_date timestamp with time zone NOT NULL
+	);`,
 }

@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -67,22 +68,51 @@ func (p *Postgres) setup() error {
 	}
 	p.dbTimer = time.Duration(config.Setting.DBTimer) * time.Second
 
+	decoder.SetDbValidator(p)
+
 	logp.Info("%s connection established\n", config.Setting.DBDriver)
 	return nil
 }
 
+func (p *Postgres) ValidateFilterRules(fromUser, toUser string) bool {
+	var exists bool
+	if len(fromUser) > 1 {
+		if strings.HasPrefix(fromUser, "0") {
+			fromUser = strings.TrimPrefix(fromUser, "0")
+		}
+	}
+	if len(toUser) > 1 {
+		if strings.HasPrefix(toUser, "0") {
+			toUser = strings.TrimPrefix(toUser, "0")
+		}
+	}
+
+	searchTo := "%" + toUser + "%"
+	searchFrom := "%" + fromUser + "%"
+	err := p.db.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM filter_rules WHERE from_user like $1 or to_user like $2)",
+		searchFrom,
+		searchTo,
+	).Scan(&exists)
+	if err != nil {
+		return false
+	}
+
+	return exists
+}
+
 func (p *Postgres) insert(hCh chan *decoder.HEP) {
 	var (
-		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, rtpCnt, isupCnt, reportCnt int
+		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, isupCnt, reportCnt int
 
-		callRows   = make([]string, 0, p.bulkCnt)
-		regRows    = make([]string, 0, p.bulkCnt)
-		defRows    = make([]string, 0, p.bulkCnt)
-		dnsRows    = make([]string, 0, p.bulkCnt)
-		logRows    = make([]string, 0, p.bulkCnt)
-		isupRows   = make([]string, 0, p.bulkCnt)
-		rtcpRows   = make([]string, 0, p.bulkCnt)
-		rtpRows    = make([]RTPRow, 0, p.bulkCnt)
+		callRows = make([]string, 0, p.bulkCnt)
+		regRows  = make([]string, 0, p.bulkCnt)
+		defRows  = make([]string, 0, p.bulkCnt)
+		dnsRows  = make([]string, 0, p.bulkCnt)
+		logRows  = make([]string, 0, p.bulkCnt)
+		isupRows = make([]string, 0, p.bulkCnt)
+		rtcpRows = make([]string, 0, p.bulkCnt)
+		//rtpRows    = make([]RTPRow, 0, p.bulkCnt)
 		reportRows = make([]string, 0, p.bulkCnt)
 		maxWait    = p.dbTimer
 	)
@@ -154,24 +184,27 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 					isupRows = []string{}
 					isupCnt = 0
 				}
-			} else if pkt.ProtoType == 7 && pkt.RTPPayload != nil && pkt.CID != "" {
+			} else if pkt.ProtoType == 7 && pkt.RTPPayload != nil {
 				pHeader := makeProtoHeader(pkt, bb)
 				dHeader := makeRTPDataHeader(pkt, bb)
+				p.insertRTP(pkt.CID, date, pHeader, dHeader, pkt.RTPPayload)
 
-				rtpRows = append(rtpRows, RTPRow{
-					SID:            pkt.CID,
-					CreateDate:     date,
-					ProtocolHeader: pHeader,
-					DataHeader:     dHeader,
-					RTPPayload:     pkt.RTPPayload,
-				})
-				rtpCnt++
-				if rtpCnt == 10 {
-					p.bulkInsertRTP(rtpCopy, rtpRows)
-					rtpRows = make([]RTPRow, 0, p.bulkCnt)
-					rtpCnt = 0
-				}
-			} else if pkt.ProtoType >= 2 && pkt.Payload != "" && pkt.CID != "" {
+				/*
+					rtpRows = append(rtpRows, RTPRow{
+						SID:            pkt.CID,
+						CreateDate:     date,
+						ProtocolHeader: pHeader,
+						DataHeader:     dHeader,
+						RTPPayload:     pkt.RTPPayload,
+					})
+					rtpCnt++
+					if rtpCnt == 5 {
+						p.bulkInsertRTP(rtpCopy, rtpRows)
+						rtpRows = make([]RTPRow, 0, p.bulkCnt)
+						rtpCnt = 0
+					}
+				*/
+			} else if pkt.ProtoType >= 2 && pkt.Payload != "" && pkt.CID != "" && pkt.ProtoType != 7 {
 				pHeader := makeProtoHeader(pkt, bb)
 				dHeader := makeRTCDataHeader(pkt, bb)
 				switch pkt.ProtoType {
@@ -183,16 +216,6 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 						rtcpRows = []string{}
 						rtcpCnt = 0
 					}
-				/*
-					case 7:
-						rtpRows = append(rtpRows, pkt.CID, date, pHeader, dHeader, pkt.RTPPayload)
-						rtpCnt++
-						if rtpCnt == p.bulkCnt {
-							p.bulkInsertRTP(rtpCopy, rtpRows)
-							rtpRows = []interface{}{}
-							rtpCnt = 0
-						}
-				*/
 				case 53:
 					dnsRows = append(dnsRows, pkt.CID, date, pHeader, dHeader, pkt.Payload)
 					dnsCnt++
@@ -332,7 +355,6 @@ func (p *Postgres) bulkInsert(query string, rows []string) {
 
 func (p *Postgres) bulkInsertRTP(query string, rows []RTPRow) {
 	//need to fix this bulkInsert, had some problems with copy
-	logp.Info("bulkinsert rtp")
 	tx, err := p.db.Begin()
 	if err != nil || tx == nil {
 		logp.Err("%v", err)
@@ -352,8 +374,6 @@ func (p *Postgres) bulkInsertRTP(query string, rows []RTPRow) {
 	for _, row := range rows {
 		payloadCopy := make([]byte, len(row.RTPPayload))
 		copy(payloadCopy, row.RTPPayload)
-		logp.Info("Antes do exec orignal %x", row.RTPPayload)
-		logp.Info("Antes do exec copy %x", payloadCopy)
 
 		_, err := tx.Exec(insertQuery,
 			row.SID,
@@ -376,4 +396,39 @@ func (p *Postgres) bulkInsertRTP(query string, rows []RTPRow) {
 	}
 
 	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)
+}
+
+func (p *Postgres) insertRTP(sid, date, pHeader, dHeader string, payload []byte) {
+	tx, err := p.db.Begin()
+	if err != nil || tx == nil {
+		logp.Err("%v", err)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	insertQuery := `
+		insert into hep_proto_7_default (sid, create_date, protocol_header, data_header, raw)
+		values ($1, $2, $3, $4, $5)
+	`
+	_, er := tx.Exec(insertQuery,
+		sid,
+		date,
+		pHeader,
+		dHeader,
+		payload,
+	)
+	if er != nil {
+		logp.Err("insert error %v", er)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		logp.Err("commit error %v", err)
+		tx.Rollback()
+		return
+	}
 }
