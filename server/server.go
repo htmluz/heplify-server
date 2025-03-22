@@ -51,7 +51,7 @@ const maxPktLen = 65507
 
 func NewHEPInput() *HEPInput {
 	h := &HEPInput{
-		inputCh:    make(chan []byte, 40000),
+		inputCh:    make(chan []byte, 500000),
 		buffer:     &sync.Pool{New: func() interface{} { return make([]byte, maxPktLen) }},
 		wg:         &sync.WaitGroup{},
 		quit:       make(chan bool),

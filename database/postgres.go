@@ -101,6 +101,15 @@ func (p *Postgres) ValidateFilterRules(fromUser, toUser string) bool {
 	return exists
 }
 
+func (p *Postgres) InsertRTPBypass(h *decoder.HEP) {
+	bb := bytebufferpool.Get()
+	defer bytebufferpool.Put(bb)
+	pHeader := makeProtoHeader(h, bb)
+	dHeader := makeRTPDataHeader(h, bb)
+	date := h.Timestamp.Format(time.RFC3339Nano)
+	p.insertRTP(h.CID, date, pHeader, dHeader, h.RTPPayload)
+}
+
 func (p *Postgres) insert(hCh chan *decoder.HEP) {
 	var (
 		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, isupCnt, reportCnt int

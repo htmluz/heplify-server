@@ -82,6 +82,7 @@ const (
 
 type DBValidator interface {
 	ValidateFilterRules(fromUser, toUser string) bool
+	InsertRTPBypass(h *HEP)
 }
 
 var defaultValidator DBValidator
@@ -277,6 +278,10 @@ func validateUserInDB(fromUser string, toUser string) bool {
 	return defaultValidator.ValidateFilterRules(fromUser, toUser)
 }
 
+func insertRTP(h *HEP) {
+	defaultValidator.InsertRTPBypass(h)
+}
+
 // Stolen from heplify
 // TODO: move to utils
 func getHeaderValue(headerNames [][]byte, data []byte) ([]byte, error) {
@@ -383,7 +388,7 @@ func (h *HEP) parse(packet []byte) error {
 			}
 		}
 	}
-	if h.ProtoType == 7 && len(h.RTPPayload) > 6 {
+	if h.ProtoType == 7 && len(h.RTPPayload) > 12 && h.RTPPayload[0] == 0x80 {
 		byteSrcIp := []byte(h.SrcIP)
 		strSrcPort := strconv.Itoa(int(h.SrcPort))
 		byteSrcPort := []byte(strSrcPort)
@@ -397,6 +402,8 @@ func (h *HEP) parse(packet []byte) error {
 					err, h.Payload, h.NodeID, h.ProtoType, h.Version, h.Protocol, h.SrcIP, h.SrcPort, h.DstIP, h.DstPort)
 				return err
 			}
+			insertRTP(h)
+			h.ProtoType = 0
 		} else {
 			//if not cached wont store the RTP packet
 			h.ProtoType = 0
