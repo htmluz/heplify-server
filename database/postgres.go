@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coocood/freecache"
 	_ "github.com/lib/pq"
 	"github.com/negbie/logp"
 	"github.com/sipcapture/heplify-server/config"
@@ -19,13 +20,28 @@ type Postgres struct {
 	forceHEPPayload []int
 }
 
-type RTPRow struct {
-	SID            string
-	CreateDate     string
-	ProtocolHeader string
-	DataHeader     string
-	RTPPayload     []byte
+type CallRecord struct {
+	CallID     string
+	CreateDate time.Time
+	StartDate  time.Time
+	EndDate    time.Time
+	Caller     string
+	Callee     string
+	SIPStatus  string
 }
+
+var (
+	briefCache = freecache.NewCache(64 * 1024 * 1024)
+
+	startMethods = map[string]bool{
+		"INVITE": true,
+	}
+
+	endMethods = map[string]bool{
+		"BYE":    true,
+		"CANCEL": true,
+	}
+)
 
 const (
 	callCopy     = "COPY hep_proto_1_call(sid,create_date,protocol_header,data_header,raw) FROM STDIN"
@@ -110,20 +126,41 @@ func (p *Postgres) InsertRTPBypass(h *decoder.HEP) {
 	p.insertRTP(h.CID, date, pHeader, dHeader, h.RTPPayload)
 }
 
+func (p *Postgres) parseHEPtoCallRecord(pkt *decoder.HEP) *CallRecord {
+	now := time.Now()
+	callRecord := &CallRecord{
+		CallID:     pkt.SID,
+		CreateDate: now,
+		StartDate:  pkt.Timestamp,
+		EndDate:    pkt.Timestamp,
+		Caller:     pkt.SIP.FromUser,
+		Callee:     pkt.SIP.ToUser,
+		SIPStatus:  pkt.SIP.FirstResp,
+	}
+	return callRecord
+}
+
+func isErrorResponse(resp string) bool {
+	return strings.HasPrefix(resp, "4") ||
+		strings.HasPrefix(resp, "5") ||
+		strings.HasPrefix(resp, "6")
+}
+
 func (p *Postgres) insert(hCh chan *decoder.HEP) {
 	var (
-		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, isupCnt, reportCnt int
+		callCnt, regCnt, defCnt, dnsCnt, logCnt, rtcpCnt, isupCnt, reportCnt, briefStartCnt, briefEndCnt int
 
-		callRows = make([]string, 0, p.bulkCnt)
-		regRows  = make([]string, 0, p.bulkCnt)
-		defRows  = make([]string, 0, p.bulkCnt)
-		dnsRows  = make([]string, 0, p.bulkCnt)
-		logRows  = make([]string, 0, p.bulkCnt)
-		isupRows = make([]string, 0, p.bulkCnt)
-		rtcpRows = make([]string, 0, p.bulkCnt)
-		//rtpRows    = make([]RTPRow, 0, p.bulkCnt)
-		reportRows = make([]string, 0, p.bulkCnt)
-		maxWait    = p.dbTimer
+		callRows       = make([]string, 0, p.bulkCnt)
+		regRows        = make([]string, 0, p.bulkCnt)
+		defRows        = make([]string, 0, p.bulkCnt)
+		dnsRows        = make([]string, 0, p.bulkCnt)
+		logRows        = make([]string, 0, p.bulkCnt)
+		isupRows       = make([]string, 0, p.bulkCnt)
+		rtcpRows       = make([]string, 0, p.bulkCnt)
+		reportRows     = make([]string, 0, p.bulkCnt)
+		briefStartRows = make([]CallRecord, 0, p.bulkCnt)
+		briefEndRows   = make([]CallRecord, 0, p.bulkCnt)
+		maxWait        = p.dbTimer
 	)
 
 	timer := time.NewTimer(maxWait)
@@ -158,6 +195,29 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 				dHeader := makeSIPDataHeader(pkt, bb, t)
 				switch pkt.SIP.Profile {
 				case "call":
+
+					// BYE, CANCEL 3xx, 4xx, 5xx or 6xx to write in brief table
+					if isErrorResponse(pkt.SIP.FirstResp) || endMethods[pkt.SIP.FirstMethod] {
+						cr := p.parseHEPtoCallRecord(pkt)
+						briefEndRows = append(briefEndRows, *cr)
+						briefEndCnt++
+						if true {
+							p.briefBulkEnd(briefEndRows)
+							briefEndRows = []CallRecord{}
+							// briefEndCnt = 0
+						}
+						// INVITE brief table
+					} else if startMethods[pkt.SIP.FirstMethod] {
+						cr := p.parseHEPtoCallRecord(pkt)
+						briefStartRows = append(briefStartRows, *cr)
+						briefStartCnt++
+						if true {
+							p.briefBulkStart(briefStartRows)
+							briefStartRows = []CallRecord{}
+							//briefStartCnt = 0
+						}
+					}
+
 					callRows = append(callRows, pkt.SID, date, pHeader, dHeader, pkt.Payload)
 					callCnt++
 					if callCnt == p.bulkCnt {
@@ -197,22 +257,6 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 				pHeader := makeProtoHeader(pkt, bb)
 				dHeader := makeRTPDataHeader(pkt, bb)
 				p.insertRTP(pkt.CID, date, pHeader, dHeader, pkt.RTPPayload)
-
-				/*
-					rtpRows = append(rtpRows, RTPRow{
-						SID:            pkt.CID,
-						CreateDate:     date,
-						ProtocolHeader: pHeader,
-						DataHeader:     dHeader,
-						RTPPayload:     pkt.RTPPayload,
-					})
-					rtpCnt++
-					if rtpCnt == 5 {
-						p.bulkInsertRTP(rtpCopy, rtpRows)
-						rtpRows = make([]RTPRow, 0, p.bulkCnt)
-						rtpCnt = 0
-					}
-				*/
 			} else if pkt.ProtoType >= 2 && pkt.Payload != "" && pkt.CID != "" && pkt.ProtoType != 7 {
 				pHeader := makeProtoHeader(pkt, bb)
 				dHeader := makeRTCDataHeader(pkt, bb)
@@ -321,6 +365,122 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 	}
 }
 
+func (p *Postgres) briefBulkStart(rows []CallRecord) {
+	if len(rows) == 0 {
+		return
+	}
+
+	query := `INSERT INTO hep_brief_call_records (
+		sid, create_date, start_date, end_date, caller, callee, sip_status
+	) VALUES ($1, $2, $3, $4, $5, $6, $7)`
+
+	tx, err := p.db.Begin()
+	if err != nil || tx == nil {
+		logp.Err("%v", err)
+		return
+	}
+
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		logp.Err("%v", err)
+		err := tx.Rollback()
+		if err != nil {
+			logp.Err("%v", err)
+		}
+		return
+	}
+
+	for _, row := range rows {
+		// Check if the call is on the cache
+		// If true it's a sign that it already been written
+		r, _ := briefCache.Get([]byte(row.CallID))
+		if r != nil {
+			continue
+		} else {
+			_, err = stmt.Exec(
+				row.CallID,
+				row.CreateDate,
+				row.StartDate,
+				row.EndDate,
+				row.Caller,
+				row.Callee,
+				row.SIPStatus,
+			)
+			if err != nil {
+				logp.Err("%v", err)
+				continue
+			}
+			if err := briefCache.Set([]byte(row.CallID), []byte("yes"), 600); err != nil {
+				logp.Err("Error inserting callId onto cache %v", err)
+			}
+		}
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+
+	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)
+}
+
+func (p *Postgres) briefBulkEnd(rows []CallRecord) {
+	if len(rows) == 0 {
+		return
+	}
+
+	query := `UPDATE hep_brief_call_records
+		SET end_date = $2,
+				sip_status = $3
+		WHERE sid = $1`
+
+	tx, err := p.db.Begin()
+	if err != nil || tx == nil {
+		logp.Err("%v", err)
+		return
+	}
+
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		logp.Err("%v", err)
+		err := tx.Rollback()
+		if err != nil {
+			logp.Err("%v", err)
+		}
+		return
+	}
+
+	for _, row := range rows {
+		_, err = stmt.Exec(
+			row.CallID,
+			row.EndDate,
+			row.SIPStatus,
+		)
+		logp.Warn("sipstatus - %v", row.SIPStatus)
+		if err != nil {
+			logp.Err("%v", err)
+			continue
+		}
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		logp.Err("%v", err)
+	}
+
+	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)
+}
+
 func (p *Postgres) bulkInsert(query string, rows []string) {
 	tx, err := p.db.Begin()
 	if err != nil || tx == nil {
@@ -357,51 +517,6 @@ func (p *Postgres) bulkInsert(query string, rows []string) {
 	err = tx.Commit()
 	if err != nil {
 		logp.Err("%v", err)
-	}
-
-	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)
-}
-
-func (p *Postgres) bulkInsertRTP(query string, rows []RTPRow) {
-	//need to fix this bulkInsert, had some problems with copy
-	tx, err := p.db.Begin()
-	if err != nil || tx == nil {
-		logp.Err("%v", err)
-		return
-	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	insertQuery := `
-		insert into hep_proto_7_default (sid, create_date, protocol_header, data_header, raw)
-		values ($1, $2, $3, $4, $5)
-	`
-
-	for _, row := range rows {
-		payloadCopy := make([]byte, len(row.RTPPayload))
-		copy(payloadCopy, row.RTPPayload)
-
-		_, err := tx.Exec(insertQuery,
-			row.SID,
-			row.CreateDate,
-			row.ProtocolHeader,
-			row.DataHeader,
-			payloadCopy,
-		)
-		if err != nil {
-			logp.Err("insert error %v", err)
-		}
-
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		logp.Err("erro no commit: %v", err)
-		tx.Rollback()
-		return
 	}
 
 	logp.Debug("sql", "%s\n\n%v\n\n", query, rows)

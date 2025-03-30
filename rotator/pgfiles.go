@@ -63,6 +63,8 @@ var idxqospg = []string{
 	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_srcIp ON hep_proto_7_default_{{date}}_{{time}} ((protocol_header->>'srcIp'));",
 	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_dstIp ON hep_proto_7_default_{{date}}_{{time}} ((protocol_header->>'dstIp'));",
 	"CREATE INDEX IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}}_correlation_id ON hep_proto_7_default_{{date}}_{{time}} ((protocol_header->>'correlation_id'));",
+
+	"CREATE INDEX IF NOT EXISTS hep_brief_call_records_{{date}}_{{time}}_dates_caller_callee ON hep_brief_call_records_{{date}}_{{time}} (start_date, end_date, caller, callee)",
 }
 
 var idxsippg = []string{
@@ -124,6 +126,7 @@ var parqospg = []string{
 	"CREATE TABLE IF NOT EXISTS hep_proto_35_default_{{date}}_{{time}} PARTITION OF hep_proto_35_default FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
 	"CREATE TABLE IF NOT EXISTS hep_proto_5_default_{{date}}_{{time}} PARTITION OF hep_proto_5_default FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
 	"CREATE TABLE IF NOT EXISTS hep_proto_7_default_{{date}}_{{time}} PARTITION OF hep_proto_7_default FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
+	"CREATE TABLE IF NOT EXISTS hep_brief_call_records_{{date}}_{{time}} PARTITION OF hep_brief_call_records FOR VALUES FROM ('{{startTime}}') TO ('{{endTime}}');",
 }
 
 var parsippg = []string{
@@ -133,6 +136,65 @@ var parsippg = []string{
 }
 
 var tbldatapg = []string{
+	// tables for marge
+	`CREATE TABLE IF NOT EXISTS users (
+		id SERIAL PRIMARY KEY,
+		username VARCHAR(255) NOT NULL UNIQUE,
+		email VARCHAR(255) NOT NULL UNIQUE,
+		password_hash VARCHAR(255) NOT NULL,
+		full_name VARCHAR(255),
+		active BOOLEAN DEFAULT true,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS roles (
+		id SERIAL PRIMARY KEY,
+		name VARCHAR(50) NOT NULL UNIQUE,
+		description TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS permissions (
+		id SERIAL PRIMARY KEY,
+		name VARCHAR(100) NOT NULL UNIQUE,
+		description TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS role_permissions (
+		role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
+		permission_id INTEGER REFERENCES permissions(id) ON DELETE CASCADE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (role_id, permission_id)
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS user_roles (
+		user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+		role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (user_id, role_id)
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS refresh_tokens (
+		id SERIAL PRIMARY KEY,
+		token VARCHAR(255) NOT NULL UNIQUE,
+		user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+		expires_at TIMESTAMP NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	// tables for homer
+	`CREATE TABLE IF NOT EXISTS hep_brief_call_records (
+		sid varchar NOT NULL,
+		create_date timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+		start_date timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+		end_date timestamp with time zone,
+		caller varchar,
+		callee varchar,
+		sip_status varchar
+	) PARTITION BY RANGE (create_date);`,
+
 	`CREATE TABLE IF NOT EXISTS hep_proto_100_default (
 		id BIGSERIAL NOT NULL,
 		sid varchar NOT NULL,

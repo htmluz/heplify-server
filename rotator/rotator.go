@@ -319,6 +319,7 @@ func (r *Rotator) DropTables() (err error) {
 		r.dbExecDropTables(db, selectisuppg, dropisuppg, r.dropDays)
 		r.dbExecDropTables(db, selectreportpg, dropreportpg, r.dropDays)
 		r.dbExecDropTables(db, selectrtcppg, droprtcppg, r.dropDays)
+		r.dbExecDropTables(db, selectrtppg, droprtcppg, r.dropDays)
 		r.dbExecDropTables(db, selectcallpg, dropcallpg, r.dropDaysCall)
 		r.dbExecDropTables(db, selectregisterpg, dropregisterpg, r.dropDaysRegister)
 		r.dbExecDropTables(db, selectdefaultpg, dropdefaultpg, r.dropDaysDefault)
