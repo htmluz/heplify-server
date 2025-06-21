@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coocood/freecache"
@@ -18,6 +19,10 @@ type Postgres struct {
 	dbTimer         time.Duration
 	bulkCnt         int
 	forceHEPPayload []int
+
+	currentCalls int64
+	saveInterval time.Duration
+	stopChan     chan struct{}
 }
 
 type CallRecord struct {
@@ -28,6 +33,11 @@ type CallRecord struct {
 	Caller     string
 	Callee     string
 	SIPStatus  string
+}
+
+type HistoryPoint struct {
+	Timestamp       time.Time `json:"timestamp"`
+	ConcurrentCalls int64     `json:"concurrent_calls"`
 }
 
 var (
@@ -86,6 +96,8 @@ func (p *Postgres) setup() error {
 
 	decoder.SetDbValidator(p)
 
+	p.InitCallCounter(30 * time.Second)
+
 	logp.Info("%s connection established\n", config.Setting.DBDriver)
 	return nil
 }
@@ -115,6 +127,77 @@ func (p *Postgres) ValidateFilterRules(fromUser, toUser string) bool {
 	}
 
 	return exists
+}
+
+func (p *Postgres) InitCallCounter(saveInterval time.Duration) {
+	logp.Info("iniciou counter")
+	p.saveInterval = saveInterval
+	p.stopChan = make(chan struct{})
+
+	p.loadCurrentCallCount()
+
+	go p.periodicalCallCountSave()
+}
+
+func (p *Postgres) loadCurrentCallCount() {
+	var lastCount int64
+	err := p.db.QueryRow(`
+		SELECT concurrent_calls
+		FROM concurrent_calls_history
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`).Scan(&lastCount)
+
+	if err != nil && err != sql.ErrNoRows {
+		logp.Critical("Error loading concurrent_calls: %v", err)
+		return
+	}
+
+	atomic.StoreInt64(&p.currentCalls, lastCount)
+}
+
+func (p *Postgres) IncrementCallCounter() {
+	atomic.AddInt64(&p.currentCalls, 1)
+}
+
+func (p *Postgres) DecrementCallCounter() {
+	current := atomic.AddInt64(&p.currentCalls, -1)
+	if current < 0 {
+		atomic.StoreInt64(&p.currentCalls, 0)
+	}
+}
+
+func (p *Postgres) GetCurrentCallCounter() int64 {
+	return atomic.LoadInt64(&p.currentCalls)
+}
+
+func (p *Postgres) saveCurrentCallCount() error {
+	currentCount := atomic.LoadInt64(&p.currentCalls)
+
+	_, err := p.db.Exec(`
+		INSERT INTO concurrent_calls_history (concurrent_calls, timestamp)
+		VALUES ($1, NOW())
+	`, currentCount)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *Postgres) periodicalCallCountSave() {
+	ticker := time.NewTicker(p.saveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			p.saveCurrentCallCount()
+		case <-p.stopChan:
+			p.saveCurrentCallCount()
+		}
+	}
 }
 
 func (p *Postgres) InsertRTPBypass(h *decoder.HEP) {
@@ -201,6 +284,7 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 						cr := p.parseHEPtoCallRecord(pkt)
 						briefEndRows = append(briefEndRows, *cr)
 						briefEndCnt++
+						p.DecrementCallCounter()
 						if true {
 							p.briefBulkEnd(briefEndRows)
 							briefEndRows = []CallRecord{}
@@ -211,6 +295,7 @@ func (p *Postgres) insert(hCh chan *decoder.HEP) {
 						cr := p.parseHEPtoCallRecord(pkt)
 						briefStartRows = append(briefStartRows, *cr)
 						briefStartCnt++
+						p.IncrementCallCounter()
 						if true {
 							p.briefBulkStart(briefStartRows)
 							briefStartRows = []CallRecord{}

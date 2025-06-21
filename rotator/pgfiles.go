@@ -195,6 +195,15 @@ var tbldatapg = []string{
 		sip_status varchar
 	) PARTITION BY RANGE (create_date);`,
 
+	`CREATE TABLE IF NOT EXISTS concurrent_calls_history (
+		id SERIAL PRIMARY KEY,
+		timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		concurrent_calls INTEGER NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);`,
+
+	`CREATE INDEX idx_concurrent_calls_timestamp ON concurrent_calls_history (timestamp);`,
+
 	`CREATE TABLE IF NOT EXISTS hep_proto_100_default (
 		id BIGSERIAL NOT NULL,
 		sid varchar NOT NULL,
